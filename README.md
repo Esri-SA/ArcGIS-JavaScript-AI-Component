@@ -8,8 +8,6 @@ The setup steps below include command equivalents for macOS, Linux, and Windows 
 
 [![Watch the video walkthrough: Agentic GIS Meets MCP: Building an ArcGIS AI App](https://img.youtube.com/vi/fz4QGr099ws/hqdefault.jpg)](https://youtu.be/fz4QGr099ws)
 
-Watch: [Agentic GIS Meets MCP: Building an ArcGIS AI App](https://youtu.be/fz4QGr099ws)
-
 This video walks through local setup, authorization, running the app, ArcGIS agents, and MCP integration.
 
 ## Disclaimer
@@ -21,8 +19,9 @@ Most of this app has been vibe coded with various coding agents. Review the code
 - Sign in with ArcGIS and load an existing WebMap or create a new one.
 - Use built-in map-aware assistant tools for navigation and data exploration.
 - Use MCP-backed tools for external workflows such as weather, catalog, or custom server tasks.
-- Render MCP geography on the map when results include places, ranked city lists, or bounding boxes.
+- Render MCP geography on the map when results include places, ranked city lists, or bounding boxes — each map pin shows a popup sourced from the specific article or record that mentioned that place, not a generic summary.
 - Create and manage hosted feature layers from assistant results.
+- Customise the app header and chat panel via the theme editor (`?mode=edit`) — changes persist across browser refreshes via `localStorage`.
 
 ## Local Development Requirements
 
@@ -241,4 +240,48 @@ Use it when you want the wider assistant panel and the theme editor controls:
 ```text
 http://localhost:5173/?mode=edit
 ```
+
+In edit mode you can customise:
+
+- Header title, subtitle, and font
+- Header and chat panel background colors and borders
+- Chat panel title and text colors
+
+All changes are saved to `localStorage` and survive page refreshes. Use the **Cancel** button in the theme editor to revert to the values from when you opened the dialog.
+
+## Architecture
+
+The app is structured as a thin React orchestrator (`App.tsx`) wiring together focused hook and component modules:
+
+| Layer | Files |
+|---|---|
+| Hooks | `useAuth`, `useWebMap`, `useAssistantSetup`, `useTheme` |
+| Components | `AppHeader`, `AssistantPanel`, `MapView`, `AccountMenu`, `SignInScreen`, `MapPickerScreen`, `SignOutDialog`, `ChangeMapDialog`, `NewMapDialog`, `ThemeEditorDialog` |
+| Agents | `McpPassthroughAgent`, `mcpAgentCore`, `AddLayerToMapAgent`, `CreateFeatureLayerAgent`, `ManageFeatureLayerAgent` |
+| Utils | `mcpGeoRenderer`, `arcgisMcp`, `arcgisOnline`, `featureLayerEdits`, `agentHelpers`, `mcpZodSchema`, `assistantStyler` |
+
+### MCP Geo Pipeline
+
+When an MCP tool call returns results, the pipeline:
+
+1. Runs a **single** LLM call (`extractAndSelectGeoEntities`) to extract all geocodable place names from a compact digest of all source records.
+2. Matches each place name directly to the source articles/records that mention it.
+3. Builds popup context from matched records (specific article title, description, and URL) rather than regex-matching against the raw JSON corpus — so "Tyre" shows the 2 articles about Tyre while "Lebanon" gracefully falls back to prose rather than repeating all 10 articles.
+
+## Copilot Agent Team
+
+The `.github/agents/` directory contains a specialist agent team for VS Code Copilot:
+
+| Agent | When to use |
+|---|---|
+| `feature-orchestrator` | End-to-end feature delivery (PLAN → BUILD → TEST → SHIP) |
+| `arcgis-calcite` | Calcite Design System and ArcGIS 5.0 web components |
+| `mcp` | MCP hub, passthrough agent, geo renderer |
+| `testing` | Code quality, slot validation, accessibility, JS correctness |
+| `docs` | README and inline documentation |
+| `github-manager` | Branch naming, commits, PRs |
+| `typescript` | Type errors, generics, Zod schemas |
+| `react-architect` | Component extraction, hooks, project structure |
+| `html` | Semantic HTML, accessibility, slot composition |
+| `code-security` | OWASP checks, secret detection, security audits |
 

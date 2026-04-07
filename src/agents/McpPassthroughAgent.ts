@@ -1,11 +1,13 @@
 import { invokeToolPrompt } from "@arcgis/ai-orchestrator";
-import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages";
+import { HumanMessage, ToolMessage } from "@langchain/core/messages";
 import { tool } from "@langchain/core/tools";
 import { StateGraph, Annotation as ANNOTATION, START, END } from "@langchain/langgraph/web";
 import { z } from "zod";
-import { buildToolPromptText, deriveGeoEntities, normalizeUrl, prioritizeRequestedGeoFocus, resolveHubServersUrl, type McpToolDef } from "./mcpAgentCore";
+import { buildToolPromptText, deriveGeoEntities, enrichGeoEntityContext, normalizeUrl, prioritizeRequestedGeoFocus, resolveHubServersUrl, type McpToolDef } from "./mcpAgentCore";
+import { inputSchemaToZod, normalizeToolArgsForCall, truncateDescription } from "../utils/mcpZodSchema";
 import { clearMcpGeoLayer, renderMcpGeoEntities, type GeoEntity } from "../utils/mcpGeoRenderer";
 import { setLastAssistantGeoSnapshot } from "../utils/assistantState";
+import { normalizeMessages, contentToText, getLastAiMessage, isAiMessageLike, isToolMessageLike, hasToolCalls, extractMessageText } from "../utils/agentHelpers";
 
 export interface McpPassthroughAgentContext {
   baseUrl?: string;
@@ -32,84 +34,183 @@ const MCP_TOOL_CALL_TIMEOUT_MS = 15_000;
 const MCP_NOTIFY_TIMEOUT_MS = 3_000;
 const HUB_SERVERS_TIMEOUT_MS = 4_000;
 
-const geoRenderSelectionTool = tool(
+/**
+ * Single LLM call that both extracts named places from the response text AND
+ * decides which structured entities (coords/polygons from tool outputs) to keep.
+ * Schema is intentionally minimal — just names + indices — so the model output
+ * is small and fast. Context/descriptions are filled in afterwards by
+ * enrichGeoEntityContext working from the full corpus.
+ */
+const geoExtractAndSelectTool = tool(
   async (args: any) => JSON.stringify(args ?? {}),
   {
-    name: "select_geo_render_entities",
-    description:
-      "Choose which derived geographic entities should be rendered on the map. " +
-      "Keep only places that are directly relevant to the user's request and materially support the assistant's answer. " +
-      "Exclude incidental mentions, malformed place names, and locations that only appear as side references.",
+    name: "extract_and_select_geo_entities",
+    description: "Extract geocodable place names from the assistant response and select which structured candidates to keep on the map.",
     schema: z.object({
-      keepIndices: z.array(z.number().int().min(0)).max(20),
-      rationale: z.string().optional(),
+      namedPlaces: z.array(z.string()).max(20).describe(
+        "Canonical geocodable place names found anywhere in the response: cities, towns, villages, countries, landmarks, regions. " +
+        "Include locations of events, article subjects, and result records. " +
+        "Exclude product names, company names, acronyms, and non-geographic nouns.",
+      ),
+      keepStructuredIndices: z.array(z.number().int().nonnegative()).describe(
+        "0-based indices from the structured candidates list to keep. Keep candidates whose place is central to the answer.",
+      ),
     }),
   },
 );
 
-function summarizeEntityForSelection(entity: GeoEntity, index: number): string {
-  const label = entity.kind === "point" || entity.kind === "extent" ? entity.label : entity.name;
-  const detailParts = [
-    `kind=${entity.kind}`,
-    `origin=${entity.origin}`,
-    entity.description ? `description=${JSON.stringify(entity.description.slice(0, 140))}` : "",
-    entity.context?.summary ? `summary=${JSON.stringify(entity.context.summary.slice(0, 220))}` : "",
-    entity.context?.mcpFields?.length
-      ? `fields=${JSON.stringify(entity.context.mcpFields.slice(0, 3).map((field) => `${field.label}: ${field.value}`).join(" | "))}`
-      : "",
-    entity.context?.links?.[0]?.url ? `link=${entity.context.links[0].url}` : "",
-  ].filter(Boolean);
-  return `${index}. ${JSON.stringify(label)} (${detailParts.join(", ")})`;
-}
-
-async function pruneGeoEntitiesWithModel(
-  entities: GeoEntity[],
-  userText: string,
+async function extractAndSelectGeoEntities(
   responseText: string,
+  userText: string,
+  structuredEntities: GeoEntity[],
+  toolOutputTexts: string[] = [],
 ): Promise<GeoEntity[]> {
-  if (entities.length <= 1) return entities;
+  if (!responseText.trim()) return structuredEntities;
 
-  const entitySummary = entities
-    .slice(0, 20)
-    .map((entity, index) => summarizeEntityForSelection(entity, index))
-    .join("\n");
+  // Parse all tool output JSON arrays into structured { title, description, url } items.
+  // These are used both as the LLM's source digest AND to build per-entity popup context.
+  interface SourceItem { title: string; description: string; url: string; line: string }
+
+  function parseSourceItems(raw: string): SourceItem[] {
+    const TEXT_KEYS = ["title", "name", "headline", "description", "summary", "content", "snippet", "abstract", "label", "location", "city", "country", "region"];
+    const URL_KEYS  = ["url", "link", "href", "articleUrl", "thumbnailUrl", "urlToImage"];
+    function extractItemArrays(value: unknown): Array<Record<string, unknown>> {
+      if (Array.isArray(value)) return value.filter((v) => v && typeof v === "object") as Array<Record<string, unknown>>;
+      if (value && typeof value === "object") {
+        for (const v of Object.values(value as Record<string, unknown>)) {
+          const sub = extractItemArrays(v);
+          if (sub.length > 1) return sub;
+        }
+      }
+      return [];
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      const items = extractItemArrays(parsed);
+      if (!items.length) return [];
+      return items.slice(0, 30).map((item) => {
+        let title = "", description = "", url = "";
+        for (const k of TEXT_KEYS) {
+          const v = item[k] ?? item[k.toLowerCase()];
+          if (typeof v === "string" && v.trim()) {
+            if (!title) { title = v.trim().slice(0, 160); continue; }
+            if (!description) { description = v.trim().slice(0, 200); break; }
+          }
+        }
+        for (const k of URL_KEYS) {
+          const v = item[k] ?? item[k.toLowerCase()];
+          if (typeof v === "string" && /^https?:\/\//i.test(v.trim()) && !/thumbnail|image|photo/i.test(k)) {
+            url = v.trim(); break;
+          }
+        }
+        const line = [title, description, url].filter(Boolean).join(" | ");
+        return { title, description, url, line };
+      }).filter((item) => item.line);
+    } catch {
+      return [];
+    }
+  }
+
+  const allSourceItems: SourceItem[] = toolOutputTexts.flatMap(parseSourceItems);
+
+  // Compact text digest for the LLM (all articles fit in one context window)
+  const digestText = allSourceItems.length
+    ? allSourceItems.map((item) => item.line).join("\n") + "\n\n" + responseText.slice(0, 600)
+    : responseText.slice(0, 3000);
+
+  const structuredSummary = structuredEntities.length
+    ? structuredEntities
+        .slice(0, 15)
+        .map((e, i) => {
+          const label = e.kind === "point" || e.kind === "extent" ? e.label : e.name;
+          return `${i}. ${JSON.stringify(label)} (kind=${e.kind})`;
+        })
+        .join("\n")
+    : "(none)";
 
   try {
     const response = await invokeToolPrompt({
       promptText:
-        "You are selecting map-worthy geographic entities for an ArcGIS map. " +
-        "Use the user's request and the assistant answer to keep only entities that directly anchor the answer geographically. " +
-        "Prefer explicit geometry and canonical place names. " +
-        "Reject malformed strings, incidental references, placeholder location-only records, and places that are not central to the answer. " +
-        "If multiple candidates represent separate returned result items for the same geography, keep each one when it adds distinct supporting context, links, or summaries. " +
-        "Prefer richer entities over placeholders that only restate the place name.",
+        "You are building the geographic layer for an ArcGIS map. " +
+        "Given the assistant response and raw source data, do TWO things: " +
+        "(1) List every distinct geocodable place name — especially locations of events, incidents, articles, and data records. " +
+        "(2) From the structured candidates, return indices of places central to the answer.",
       messages: [
         new HumanMessage(
           [
             `User request:\n${userText || ""}`,
-            `Assistant answer:\n${responseText || ""}`,
-            `Candidate entities:\n${entitySummary}`,
-            "Return your decision only by calling select_geo_render_entities.",
+            `Source data + response:\n${digestText}`,
+            `Structured candidates:\n${structuredSummary}`,
           ].join("\n\n"),
         ),
       ],
-      tools: [geoRenderSelectionTool],
+      tools: [geoExtractAndSelectTool],
       temperature: 0,
     });
 
     const toolCalls = Array.isArray((response as any)?.tool_calls) ? (response as any).tool_calls : [];
-    const call = toolCalls.find((toolCall: any) => toolCall?.name === "select_geo_render_entities");
-    const keepIndices = Array.isArray(call?.args?.keepIndices)
-      ? call.args.keepIndices.filter((value: unknown) => Number.isInteger(value) && Number(value) >= 0 && Number(value) < entities.length)
-      : [];
+    const call = toolCalls.find((tc: any) => tc?.name === "extract_and_select_geo_entities");
+    if (!call?.args) return structuredEntities;
 
-    if (!keepIndices.length) return entities;
+    const { namedPlaces = [], keepStructuredIndices = [] } = call.args as {
+      namedPlaces?: string[];
+      keepStructuredIndices?: number[];
+    };
 
-    const uniqueIndices = [...new Set(keepIndices.map((value: number) => Number(value)))] as number[];
-    const selected = uniqueIndices.map((index) => entities[index]).filter(Boolean);
-    return selected.length ? selected : entities;
+    const keptStructured = [...new Set((keepStructuredIndices as number[])
+      .filter((i) => Number.isInteger(i) && i >= 0 && i < structuredEntities.length)
+      .map(Number),
+    )].map((i) => structuredEntities[i]).filter(Boolean) as GeoEntity[];
+
+    // Build per-entity context directly from the matched source items rather than
+    // running regex over the raw JSON corpus. This gives each popup the specific
+    // article(s) that mention that place — no repetition, no JSON fragments.
+    function buildContextForPlace(name: string): import("../utils/mcpGeoRenderer").GeoContext | undefined {
+      if (!allSourceItems.length) return undefined;
+      const nameLower = name.toLowerCase().replace(/,.*$/, "").trim(); // "Beirut, Lebanon" → "Beirut"
+      const matches = allSourceItems.filter(
+        (item) => item.title.toLowerCase().includes(nameLower) || item.description.toLowerCase().includes(nameLower),
+      );
+      if (!matches.length) return undefined;
+      // Prefer the fewest matches (most specific). If >6 matches the name is too generic — skip context.
+      if (matches.length > 6) return undefined;
+      const top = matches.slice(0, 2);
+      return {
+        summary: top.map((m) => m.description).filter(Boolean).join(" — ").slice(0, 320),
+        links: top
+          .filter((m) => m.url)
+          .map((m) => ({ url: m.url, label: m.title || name }))
+          .slice(0, 2),
+      };
+    }
+
+    const namedGeo: import("../utils/mcpGeoRenderer").GeoNamedPlace[] = (namedPlaces as string[])
+      .map((n) => n?.trim())
+      .filter(Boolean)
+      .filter((name) => !keptStructured.some((e) => {
+        const label = e.kind === "point" || e.kind === "extent" ? e.label : e.name;
+        return label.toLowerCase() === name.toLowerCase();
+      }))
+      .map((name) => {
+        const context = buildContextForPlace(name);
+        return {
+          kind: "named" as const,
+          origin: "source" as const,
+          name,
+          ...(context ? { context } : {}),
+        };
+      });
+
+    // For places with no source-item context, try the prose response as fallback
+    const noCtx = namedGeo.filter((e) => !e.context);
+    if (noCtx.length) {
+      enrichGeoEntityContext(noCtx, responseText);
+    }
+
+    const combined = [...keptStructured, ...namedGeo];
+    return combined.length ? combined : structuredEntities;
   } catch {
-    return entities;
+    return structuredEntities;
   }
 }
 
@@ -307,199 +408,6 @@ async function callMcpTool(endpointUrl: string, name: string, args: Record<strin
   return extractText(result?.content) || JSON.stringify(result ?? "");
 }
 
-function jsonPropToZod(prop: Record<string, unknown>, isRequired: boolean): z.ZodTypeAny {
-  return schemaToZod(prop, isRequired);
-}
-
-function inputSchemaToZod(inputSchema?: Record<string, unknown>): z.ZodTypeAny {
-  if (!inputSchema) {
-    return z.object({
-      __no_args: z.boolean().optional().describe("This tool takes no arguments. Leave unset."),
-    });
-  }
-  if (requiresRootSchemaWrapper(inputSchema)) {
-    return buildWrappedRootSchema(inputSchema);
-  }
-  return schemaToZod(inputSchema, true);
-}
-
-function rootSchemaHasExplicitProperties(inputSchema?: Record<string, unknown>): boolean {
-  const properties = inputSchema?.properties;
-  return Boolean(properties && typeof properties === "object" && !Array.isArray(properties) && Object.keys(properties).length > 0);
-}
-
-function requiresRootSchemaWrapper(inputSchema?: Record<string, unknown>): boolean {
-  if (!inputSchema) return true;
-  const rawType = inputSchema.type;
-  const types = Array.isArray(rawType) ? rawType.map(String) : typeof rawType === "string" ? [rawType] : [];
-  const nonNullTypes = types.filter((type) => type !== "null");
-  if (nonNullTypes.length > 1) return true;
-  const schemaType = nonNullTypes[0];
-  if (!schemaType || schemaType === "object") {
-    return !rootSchemaHasExplicitProperties(inputSchema);
-  }
-  return true;
-}
-
-function buildWrappedRootSchema(inputSchema?: Record<string, unknown>): z.ZodTypeAny {
-  const desc = truncateDescription(typeof inputSchema?.description === "string" ? inputSchema.description : undefined, 180);
-  const takesNoArgs = !inputSchema || (!rootSchemaHasExplicitProperties(inputSchema) && inputSchema.additionalProperties == null);
-  const wrapped = takesNoArgs
-    ? z.object({
-        __no_args: z.boolean().optional().describe("This tool takes no arguments. Leave unset."),
-      })
-    : z.object({
-        __raw_args_json: z.string().optional().describe("JSON object string containing the MCP tool arguments."),
-      });
-  return desc ? wrapped.describe(desc) : wrapped;
-}
-
-function normalizeToolArgsForCall(inputSchema: Record<string, unknown> | undefined, args: Record<string, unknown>): Record<string, unknown> {
-  if (!requiresRootSchemaWrapper(inputSchema)) {
-    return args;
-  }
-  const rawJson = typeof args.__raw_args_json === "string" ? args.__raw_args_json.trim() : "";
-  if (rawJson) {
-    try {
-      const parsed = JSON.parse(rawJson);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        return parsed as Record<string, unknown>;
-      }
-    } catch {}
-  }
-  return {};
-}
-
-function truncateDescription(text: string | undefined, maxLength = 220): string | undefined {
-  const normalized = text?.replace(/\s+/g, " ").trim();
-  if (!normalized) return undefined;
-  if (normalized.length <= maxLength) return normalized;
-  return `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
-}
-
-function enumToSchema(values: unknown[]): z.ZodTypeAny | null {
-  if (!values.length) return null;
-  if (values.every((value) => typeof value === "string")) {
-    const unique = [...new Set(values as string[])];
-    if (!unique.length) return null;
-    return unique.length === 1 ? z.literal(unique[0]) : z.enum(unique as [string, ...string[]]);
-  }
-
-  const literals = values
-    .filter((value) => ["string", "number", "boolean"].includes(typeof value))
-    .map((value) => z.literal(value as string | number | boolean));
-  if (!literals.length) return null;
-  if (literals.length === 1) return literals[0];
-  if (literals.length === 2) return z.union([literals[0], literals[1]]);
-  return z.union([literals[0], literals[1], ...literals.slice(2)] as [z.ZodTypeAny, z.ZodTypeAny, ...z.ZodTypeAny[]]);
-}
-
-function unionSchemas(parts: z.ZodTypeAny[]): z.ZodTypeAny {
-  const unique = parts.filter(Boolean);
-  if (!unique.length) return z.unknown();
-  if (unique.length === 1) return unique[0];
-  if (unique.length === 2) return z.union([unique[0], unique[1]]);
-  return z.union([unique[0], unique[1], ...unique.slice(2)] as [z.ZodTypeAny, z.ZodTypeAny, ...z.ZodTypeAny[]]);
-}
-
-function schemaToZod(schemaLike: unknown, isRequired: boolean): z.ZodTypeAny {
-  const schema = schemaLike && typeof schemaLike === "object" && !Array.isArray(schemaLike)
-    ? schemaLike as Record<string, unknown>
-    : {};
-  const desc = truncateDescription(typeof schema.description === "string" ? schema.description : undefined, 180);
-
-  let nullable = false;
-  const variants = ["anyOf", "oneOf"]
-    .flatMap((key) => Array.isArray(schema[key]) ? [schema[key] as unknown[]] : [])
-    .flat();
-  if (variants.length) {
-    const variantSchemas = variants.flatMap((variant) => {
-      const variantRecord = variant && typeof variant === "object" && !Array.isArray(variant)
-        ? variant as Record<string, unknown>
-        : null;
-      const variantType = variantRecord?.type;
-      if (variantType === "null") {
-        nullable = true;
-        return [];
-      }
-      return [schemaToZod(variant, true)];
-    });
-    let union = unionSchemas(variantSchemas);
-    if (nullable) union = union.nullable();
-    if (desc) union = union.describe(desc);
-    if (!isRequired) union = union.optional();
-    return union;
-  }
-
-  const enumSchema = Array.isArray(schema.enum) ? enumToSchema(schema.enum) : null;
-  if (enumSchema) {
-    let out = enumSchema;
-    if (desc) out = out.describe(desc);
-    if (!isRequired) out = out.optional();
-    return out;
-  }
-
-  const rawType = schema.type;
-  const types = Array.isArray(rawType) ? rawType.map(String) : typeof rawType === "string" ? [rawType] : [];
-  const nonNullTypes = types.filter((type) => type !== "null");
-  if (types.includes("null")) nullable = true;
-
-  let out: z.ZodTypeAny;
-  if (nonNullTypes.length > 1) {
-    out = unionSchemas(nonNullTypes.map((type) => schemaToZod({ ...schema, type }, true)));
-  } else {
-    const type = nonNullTypes[0];
-    switch (type) {
-      case "integer":
-        out = z.number().int();
-        break;
-      case "number":
-        out = z.number();
-        break;
-      case "boolean":
-        out = z.boolean();
-        break;
-      case "array": {
-        const itemSchema = schema.items ? schemaToZod(schema.items, true) : z.unknown();
-        out = z.array(itemSchema);
-        break;
-      }
-      case "object": {
-        const properties = schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties)
-          ? schema.properties as Record<string, Record<string, unknown>>
-          : undefined;
-        const required = Array.isArray(schema.required) ? schema.required.map(String) : [];
-        if (properties && Object.keys(properties).length) {
-          const shape: Record<string, z.ZodTypeAny> = {};
-          for (const [key, prop] of Object.entries(properties)) {
-            shape[key] = jsonPropToZod(prop, required.includes(key));
-          }
-          let objectSchema = z.object(shape);
-          if (schema.additionalProperties && typeof schema.additionalProperties === "object") {
-            objectSchema = objectSchema.catchall(schemaToZod(schema.additionalProperties, true));
-          } else if (schema.additionalProperties !== true) {
-            objectSchema = objectSchema.strict();
-          }
-          out = objectSchema;
-        } else if (schema.additionalProperties && typeof schema.additionalProperties === "object") {
-          out = z.record(z.string(), schemaToZod(schema.additionalProperties, true));
-        } else {
-          out = z.record(z.string(), z.unknown());
-        }
-        break;
-      }
-      case "string":
-      default:
-        out = z.string();
-        break;
-    }
-  }
-
-  if (nullable) out = out.nullable();
-  if (desc) out = out.describe(desc);
-  if (!isRequired) out = out.optional();
-  return out;
-}
 
 function parseQualifiedToolName(name: string): { serverId: string | null; toolName: string } {
   const idx = name.indexOf("__");
@@ -603,65 +511,6 @@ export async function refreshMcpAgentDescription(assistant: HTMLElement): Promis
   } catch {}
 }
 
-function normalizeMessages(messages: any): any[] {
-  const rawMessages = Array.isArray(messages) ? messages : [];
-  if (rawMessages.length === 1 && Array.isArray(rawMessages[0])) return rawMessages[0];
-  return rawMessages.flatMap((message: any) => (Array.isArray(message) ? message : [message]));
-}
-
-function isAiMessageLike(message: any): boolean {
-  return Boolean(
-    message && (
-      AIMessage.isInstance(message) ||
-      message.getType?.() === "ai" ||
-      message.lc_kwargs?.type === "ai" ||
-      message.kwargs?.type === "ai" ||
-      message.role === "assistant"
-    )
-  );
-}
-
-function isToolMessageLike(message: any): boolean {
-  return Boolean(
-    message && (
-      ToolMessage.isInstance(message) ||
-      message.getType?.() === "tool" ||
-      message.lc_kwargs?.type === "tool" ||
-      message.kwargs?.type === "tool" ||
-      message.role === "tool"
-    )
-  );
-}
-
-function hasToolCalls(message: any): boolean {
-  return Array.isArray(message?.tool_calls) && message.tool_calls.length > 0;
-}
-
-function contentToText(content: unknown): string {
-  if (typeof content === "string") return content.trim();
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (typeof part === "string") return part;
-        if (part && typeof part === "object" && "text" in part && typeof (part as any).text === "string") {
-          return (part as any).text;
-        }
-        return "";
-      })
-      .join("\n")
-      .trim();
-  }
-  return "";
-}
-
-function extractMessageText(message: any): string {
-  if (!message) return "";
-  if (typeof message.content === "string") return message.content;
-  if (typeof message.kwargs?.content === "string") return message.kwargs.content;
-  if (typeof message.lc_kwargs?.content === "string") return message.lc_kwargs.content;
-  return contentToText(message.content);
-}
-
 function sanitizeMessagesForPrompt(messages: any[]): any[] {
   const flattened = normalizeMessages(messages);
   const sanitized: any[] = [];
@@ -704,14 +553,7 @@ function sanitizeMessagesForPrompt(messages: any[]): any[] {
   return recentVisibleHistory;
 }
 
-function getLastAiMessage(messages: any[]): AIMessage | null {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    if (AIMessage.isInstance(messages[i])) return messages[i];
-  }
-  return null;
-}
-
-function extractLastUserText(messages: any[]): string {
+function extractLastHumanMessageText(messages: any[]): string {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i];
     if (!message) continue;
@@ -793,7 +635,7 @@ export function registerMcpPassthroughAgent(
         const promptMessages = sanitizeMessagesForPrompt(messages);
         const serverLabel = ctx.serverName || "MCP";
         const resolvedUrl = ctx.baseUrl || "";
-        const userText = extractLastUserText(messages);
+        const userText = extractLastHumanMessageText(messages);
 
         let mcpToolDefs: McpToolDef[] = [];
         let discoveryError: string | null = null;
@@ -945,7 +787,7 @@ export function registerMcpPassthroughAgent(
       }
 
       const messages = normalizeMessages(agentState?.messages);
-      const userText = extractLastUserText(messages);
+      const userText = extractLastHumanMessageText(messages);
       const lastAiMessage = getLastAiMessage(messages);
       const text = contentToText(lastAiMessage?.content) || `The ${ctx.serverName || "MCP"} server did not return a response.`;
       const toolArgs: Record<string, unknown>[] = agentState?.toolCallArgsList ?? [];
@@ -962,9 +804,13 @@ export function registerMcpPassthroughAgent(
 
         void (async () => {
           try {
-            const derivedEntities = await deriveGeoEntities(text, toolArgs, toolOutputs);
-            const prunedEntities = await pruneGeoEntitiesWithModel(derivedEntities, userText, text);
-            const entities = prioritizeRequestedGeoFocus(prunedEntities, userText, toolArgs);
+            // Structured data (coords/bbox from tool outputs) is extracted
+            // deterministically first. Then a single LLM call both extracts
+            // named places from the response text AND decides which structured
+            // entities to keep — replacing the former extract+prune two-call pattern.
+            const structuredEntities = await deriveGeoEntities(text, toolArgs, toolOutputs);
+            const selectedEntities = await extractAndSelectGeoEntities(text, userText, structuredEntities, toolOutputs);
+            const entities = prioritizeRequestedGeoFocus(selectedEntities, userText, toolArgs);
             if (currentToken !== latestGeoRenderToken) return;
 
             setLastAssistantGeoSnapshot({

@@ -1,5 +1,6 @@
 import FeatureLayer from "@arcgis/core/layers/FeatureLayer";
 import Graphic from "@arcgis/core/Graphic";
+import * as locator from "@arcgis/core/rest/locator";
 import type {
   AssistantGeoMemorySnapshot,
   AssistantResultEntity,
@@ -104,24 +105,16 @@ function buildDefaultAttributes(entity: AssistantResultEntity): Record<string, u
 }
 
 async function geocodeSingleLine(singleLine: string): Promise<{ latitude: number; longitude: number } | null> {
-  const params = new URLSearchParams({
-    f: "json",
-    SingleLine: singleLine,
-    maxLocations: "1",
-    outFields: "Match_addr,Addr_type,City,Region",
-    forStorage: "false",
-  });
-
   try {
-    const response = await fetch(
-      `https://geocode-api.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?${params.toString()}`,
+    const results = await locator.addressToLocations(
+      "https://geocode-api.arcgis.com/arcgis/rest/services/World/GeocodeServer",
+      { address: { SingleLine: singleLine }, maxLocations: 1, outFields: ["Match_addr"] },
     );
-    if (!response.ok) return null;
-    const json: any = await response.json();
-    const candidate = Array.isArray(json?.candidates) ? json.candidates[0] : null;
-    const latitude = Number(candidate?.location?.y);
-    const longitude = Number(candidate?.location?.x);
-    if (isNaN(latitude) || isNaN(longitude)) return null;
+    const c = results?.[0];
+    if (!c) return null;
+    const longitude = c.location?.x;
+    const latitude = c.location?.y;
+    if (typeof latitude !== "number" || typeof longitude !== "number" || isNaN(latitude) || isNaN(longitude)) return null;
     return { latitude, longitude };
   } catch {
     return null;

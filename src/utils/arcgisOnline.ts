@@ -3,6 +3,7 @@ import esriConfig from "@arcgis/core/config";
 import IdentityManager from "@arcgis/core/identity/IdentityManager";
 import OAuthInfo from "@arcgis/core/identity/OAuthInfo";
 import Portal from "@arcgis/core/portal/Portal";
+import WebMap from "@arcgis/core/WebMap";
 
 export interface CredentialInfo {
   token: string;
@@ -1020,4 +1021,73 @@ export async function createHostedFeatureService(
 
   const message = json?.error?.message || "Failed to create hosted feature layer/service";
   return { success: false, message };
+}
+
+// ── WebMap / NewMap utilities ─────────────────────────────────────────────────
+
+export interface CategoryTreeNode {
+  label: string;
+  value: string;
+  fullLabel: string;
+  children: CategoryTreeNode[];
+}
+
+const DEFAULT_NEW_MAP_VIEWPOINT = {
+  targetGeometry: {
+    type: "extent" as const,
+    xmin: -13884991, ymin: 2870341, xmax: -7455066, ymax: 6338219,
+    spatialReference: { wkid: 102100, latestWkid: 3857 },
+  },
+};
+
+export function buildCategoryTree(options: PortalCategoryOption[]): CategoryTreeNode[] {
+  const roots: CategoryTreeNode[] = [];
+  const byValue = new Map<string, CategoryTreeNode>();
+  options.forEach((opt) => {
+    const segs = opt.value.split("/").filter(Boolean);
+    if (!segs.length) return;
+    let children = roots;
+    segs.forEach((seg, i) => {
+      const val = `/${segs.slice(0, i + 1).join("/")}`;
+      let node = byValue.get(val);
+      if (!node) {
+        node = { label: seg, value: val, fullLabel: segs.slice(0, i + 1).join(" > "), children: [] };
+        byValue.set(val, node);
+        children.push(node);
+      }
+      children = node.children;
+    });
+  });
+  return roots;
+}
+
+export function getCategoryLeafLabel(value: string, options: PortalCategoryOption[]): string {
+  const opt = options.find((o) => o.value === value);
+  const segs = (opt?.value ?? value).split("/").filter(Boolean);
+  return segs[segs.length - 1] ?? value;
+}
+
+export async function buildNewWebMap(portalUrl: string): Promise<WebMap> {
+  let basemap: any = null;
+  try {
+    const portal = new Portal({ url: portalUrl });
+    await portal.load();
+    basemap =
+      (portal.useVectorBasemaps ? portal.defaultVectorBasemap : null) ||
+      portal.defaultBasemap ||
+      portal.defaultVectorBasemap;
+    if (basemap && typeof (basemap as any).load === "function") await (basemap as any).load();
+  } catch {
+    basemap = null;
+  }
+  const webMap = new WebMap({
+    basemap: basemap || ("streets-vector" as any),
+    initialViewProperties: {
+      spatialReference: { wkid: 102100, latestWkid: 3857 },
+      viewpoint: DEFAULT_NEW_MAP_VIEWPOINT,
+    },
+  });
+  if (typeof (webMap as any).loadAll === "function") await (webMap as any).loadAll();
+  else if (typeof (webMap as any).load === "function") await (webMap as any).load();
+  return webMap;
 }

@@ -169,10 +169,34 @@ export function collectGeoHintsFromJson(
   }
 }
 
+type GeoHints = {
+  coords: Array<{ lat: number; lon: number; label?: string }>;
+  extents: Array<{ label: string; west: number; south: number; east: number; north: number }>;
+  names: string[];
+};
+
+function freshHints(): GeoHints {
+  return { coords: [], extents: [], names: [] };
+}
+
+function pushCoord(
+  coords: Array<{ lat: number; lon: number; label?: string }>,
+  lat: number,
+  lon: number,
+  label?: string,
+): void {
+  if (!Number.isNaN(lat) && !Number.isNaN(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
+    coords.push({ lat, lon, label });
+  }
+}
+
 export function collectGeoHintsFromText(
   text: string,
   out: { coords: Array<{ lat: number; lon: number; label?: string }>; names: string[] },
 ): void {
+  // Only extracts explicit coordinates and structured section names (--- delimited).
+  // Free-form place name extraction from LLM replies is handled by the LLM itself
+  // via extractGeoEntitiesFromText in McpPassthroughAgent.ts.
   const sections = text.split(/\n\s*---\s*\n/g).map((section) => section.trim()).filter(Boolean);
 
   for (const section of sections) {
@@ -182,40 +206,15 @@ export function collectGeoHintsFromText(
     const placeLine = section.match(/(?:^|\n)(?:place|city|country|region|state|province|name|title):\s*(.+)$/im)?.[1]?.trim();
     const label = fullName || heading || locationLine;
 
-    const latLonMatch = section.match(/Latitude:\s*(-?\d{1,3}(?:\.\d+)?)\s*,\s*Longitude:\s*(-?\d{1,3}(?:\.\d+)?)/i);
-    if (latLonMatch) {
-      const lat = Number(latLonMatch[1]);
-      const lon = Number(latLonMatch[2]);
-      if (!isNaN(lat) && !isNaN(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
-        out.coords.push({ lat, lon, label });
-      }
-    }
-
-    const coordLineMatch = section.match(/\*\*Coordinates:\*\*\s*(-?\d{1,3}(?:\.\d+)?)°?\s*,\s*(-?\d{1,3}(?:\.\d+)?)°?/i);
-    if (coordLineMatch) {
-      const lat = Number(coordLineMatch[1]);
-      const lon = Number(coordLineMatch[2]);
-      if (!isNaN(lat) && !isNaN(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
-        out.coords.push({ lat, lon, label });
-      }
-    }
-
-    const locationCoordMatch = section.match(/\*\*Location:\*\*\s*(-?\d{1,3}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)/i);
-    if (locationCoordMatch) {
-      const lat = Number(locationCoordMatch[1]);
-      const lon = Number(locationCoordMatch[2]);
-      if (!isNaN(lat) && !isNaN(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
-        out.coords.push({ lat, lon, label: locationLine });
-      }
-    }
-
-    const plainLocationCoordMatch = section.match(/(?:^|\n)location:\s*(-?\d{1,3}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)/im);
-    if (plainLocationCoordMatch) {
-      const lat = Number(plainLocationCoordMatch[1]);
-      const lon = Number(plainLocationCoordMatch[2]);
-      if (!isNaN(lat) && !isNaN(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
-        out.coords.push({ lat, lon, label: locationLine || placeLine || heading });
-      }
+    const coordPatterns: Array<[RegExp, string | undefined]> = [
+      [/Latitude:\s*(-?\d{1,3}(?:\.\d+)?)\s*,\s*Longitude:\s*(-?\d{1,3}(?:\.\d+)?)/i, label],
+      [/\*\*Coordinates:\*\*\s*(-?\d{1,3}(?:\.\d+)?)°?\s*,\s*(-?\d{1,3}(?:\.\d+)?)°?/i, label],
+      [/\*\*Location:\*\*\s*(-?\d{1,3}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)/i, locationLine],
+      [/(?:^|\n)location:\s*(-?\d{1,3}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)/im, locationLine || placeLine || heading],
+    ];
+    for (const [pattern, coordLabel] of coordPatterns) {
+      const m = section.match(pattern);
+      if (m) pushCoord(out.coords, Number(m[1]), Number(m[2]), coordLabel);
     }
 
     const candidateNames = [fullName, heading, locationLine, placeLine].filter(
@@ -782,7 +781,10 @@ function extractEntityContext(text: string, searchTerm: string, allEntityNames?:
 
   const nameIdx = text.search(nameRe);
   if (nameIdx >= 0) {
-    const chunk = text.slice(Math.max(0, nameIdx - 60), nameIdx + 900);
+    // Use a wider window for JSON-shaped corpus (single long line with no newlines)
+    // so the entity name in a "description" field can find the "url" field nearby.
+    const chunkRadius = relevant.some((p) => p.length > 500) ? 600 : 120;
+    const chunk = text.slice(Math.max(0, nameIdx - 30), nameIdx + chunkRadius);
     MARKDOWN_LINK_RE.lastIndex = 0;
     let markdownMatch: RegExpExecArray | null;
     while ((markdownMatch = MARKDOWN_LINK_RE.exec(chunk)) !== null) {
@@ -811,7 +813,7 @@ function extractEntityContext(text: string, searchTerm: string, allEntityNames?:
   return { summary, links, ...(mcpFields.length ? { mcpFields } : {}) };
 }
 
-function enrichGeoEntityContext(entities: GeoEntity[], corpus: string): GeoEntity[] {
+export function enrichGeoEntityContext(entities: GeoEntity[], corpus: string): GeoEntity[] {
   const deduped = dedupeGeoEntities(entities);
   const allEntityNames = deduped.map((entity) => getGeoEntityDisplayName(entity));
 
@@ -857,16 +859,7 @@ function collectSourceGeoEntities(
       entities.push(...structuredEntities);
     }
 
-    const hints: {
-      coords: Array<{ lat: number; lon: number; label?: string }>;
-      extents: Array<{ label: string; west: number; south: number; east: number; north: number }>;
-      names: string[];
-    } = {
-      coords: [],
-      extents: [],
-      names: [],
-    };
-
+    const hints = freshHints();
     if (parsed) collectGeoHintsFromJson(parsed, hints);
     collectGeoHintsFromText(output, hints);
 
@@ -943,16 +936,7 @@ function extractSourceExtentEntitiesFromText(text: string): GeoExtent[] {
 
 function collectSourceGeoEntitiesFromText(text: string): GeoEntity[] {
   const entities: GeoEntity[] = [];
-  const hints: {
-    coords: Array<{ lat: number; lon: number; label?: string }>;
-    extents: Array<{ label: string; west: number; south: number; east: number; north: number }>;
-    names: string[];
-  } = {
-    coords: [],
-    extents: [],
-    names: [],
-  };
-
+  const hints = freshHints();
   const parsed = tryParseJson(text);
   if (parsed) collectGeoHintsFromJson(parsed, hints);
   collectGeoHintsFromText(text, hints);
@@ -977,6 +961,13 @@ function collectSourceGeoEntitiesFromText(text: string): GeoEntity[] {
       east: extent.east,
       north: extent.north,
     });
+  }
+
+  // Structured-section names (--- delimited with explicit field markers) are still
+  // geocoded here. Free-form LLM reply text is handled by extractGeoEntitiesFromText.
+  for (const rawName of hints.names) {
+    const name = rawName.trim();
+    if (name) entities.push({ kind: "named", origin: "source", name } satisfies GeoNamedPlace);
   }
 
   entities.push(...extractSourceExtentEntitiesFromText(text));

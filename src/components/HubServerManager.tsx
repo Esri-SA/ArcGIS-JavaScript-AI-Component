@@ -46,64 +46,29 @@ interface DesktopServerSnippet {
 
 const HUB_API = "/api/mcp";
 
-async function fetchServers(): Promise<HubServer[]> {
-  const res = await fetch(`${HUB_API}/servers`);
-  if (!res.ok) throw new Error(`Hub returned ${res.status}`);
-  const data = await res.json();
-  return data.servers ?? [];
+async function hubApi(method: string, path: string, body?: Record<string, unknown>): Promise<any> {
+  const init: RequestInit = { method };
+  if (body !== undefined) {
+    init.headers = { "Content-Type": "application/json" };
+    init.body = JSON.stringify(body);
+  }
+  const res = await fetch(`${HUB_API}${path}`, init);
+  if (!res.ok) throw new Error(`Hub API error: ${res.status}`);
+  return method === "DELETE" ? undefined : res.json();
 }
 
-async function apiAddServer(body: Record<string, unknown>): Promise<HubServer> {
-  const res = await fetch(`${HUB_API}/servers`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`Add failed: ${res.status}`);
-  return res.json();
-}
-
-async function apiUpdateServer(
-  id: string,
-  body: Record<string, unknown>,
-): Promise<HubServer> {
-  const res = await fetch(
-    `${HUB_API}/servers/${encodeURIComponent(id)}`,
-    {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    },
-  );
-  if (!res.ok) throw new Error(`Update failed: ${res.status}`);
-  return res.json();
-}
-
-async function apiDeleteServer(id: string): Promise<void> {
-  const res = await fetch(
-    `${HUB_API}/servers/${encodeURIComponent(id)}`,
-    { method: "DELETE" },
-  );
-  if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
-}
-
-async function apiStartServer(id: string): Promise<HubServer> {
-  const res = await fetch(
-    `${HUB_API}/servers/${encodeURIComponent(id)}/start`,
-    { method: "POST" },
-  );
-  if (!res.ok) throw new Error(`Start failed: ${res.status}`);
-  return res.json();
-}
-
-async function apiStopServer(id: string): Promise<HubServer> {
-  const res = await fetch(
-    `${HUB_API}/servers/${encodeURIComponent(id)}/stop`,
-    { method: "POST" },
-  );
-  if (!res.ok) throw new Error(`Stop failed: ${res.status}`);
-  return res.json();
-}
+const fetchServers = (): Promise<HubServer[]> =>
+  hubApi("GET", "/servers").then((d) => d?.servers ?? []);
+const apiAddServer = (body: Record<string, unknown>): Promise<HubServer> =>
+  hubApi("POST", "/servers", body);
+const apiUpdateServer = (id: string, body: Record<string, unknown>): Promise<HubServer> =>
+  hubApi("PUT", `/servers/${encodeURIComponent(id)}`, body);
+const apiDeleteServer = (id: string): Promise<void> =>
+  hubApi("DELETE", `/servers/${encodeURIComponent(id)}`);
+const apiStartServer = (id: string): Promise<HubServer> =>
+  hubApi("POST", `/servers/${encodeURIComponent(id)}/start`);
+const apiStopServer = (id: string): Promise<HubServer> =>
+  hubApi("POST", `/servers/${encodeURIComponent(id)}/stop`);
 
 // ── Arg / env helpers ─────────────────────────────────────────────────────────
 
@@ -408,12 +373,6 @@ export default function HubServerManager({ open, onClose, onServersChanged }: Pr
     }
   }, [open, load]);
 
-  const notifyServersChanged = useCallback(() => {
-    onServersChanged?.();
-  }, [onServersChanged]);
-
-  // ── Actions ─────────────────────────────────────────────────────────────
-
   const handleToggle = async (server: HubServer) => {
     setBusy(true);
     try {
@@ -423,7 +382,7 @@ export default function HubServerManager({ open, onClose, onServersChanged }: Pr
       setServers((prev) =>
         prev.map((s) => (s.id === updated.id ? updated : s)),
       );
-      notifyServersChanged();
+      onServersChanged?.();
     } catch {}
     setBusy(false);
   };
@@ -433,7 +392,7 @@ export default function HubServerManager({ open, onClose, onServersChanged }: Pr
     try {
       await apiDeleteServer(id);
       setServers((prev) => prev.filter((s) => s.id !== id));
-      notifyServersChanged();
+      onServersChanged?.();
     } catch {}
     setBusy(false);
   };
@@ -472,7 +431,7 @@ export default function HubServerManager({ open, onClose, onServersChanged }: Pr
           prev.map((s) => (s.id === updated.id ? updated : s)),
         );
       }
-      notifyServersChanged();
+      onServersChanged?.();
       cancelEdit();
     } catch {}
     setBusy(false);
@@ -490,7 +449,7 @@ export default function HubServerManager({ open, onClose, onServersChanged }: Pr
       }
       setImportText("");
       await load();
-      notifyServersChanged();
+      onServersChanged?.();
     } catch (err: any) {
       setImportError(
         err?.message ??

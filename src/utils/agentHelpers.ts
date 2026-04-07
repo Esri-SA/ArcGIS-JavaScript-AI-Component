@@ -1,4 +1,4 @@
-import { AIMessage } from "@langchain/core/messages";
+import { AIMessage, ToolMessage } from "@langchain/core/messages";
 
 /**
  * Flatten potentially nested message arrays into a flat array.
@@ -42,6 +42,42 @@ export function contentToText(content: unknown): string {
 /**
  * Extract the text of the last human/user message from a LanGraph state object.
  */
+export function isAiMessageLike(message: any): boolean {
+  return Boolean(
+    message && (
+      AIMessage.isInstance(message) ||
+      message.getType?.() === "ai" ||
+      message.lc_kwargs?.type === "ai" ||
+      message.kwargs?.type === "ai" ||
+      message.role === "assistant"
+    )
+  );
+}
+
+export function isToolMessageLike(message: any): boolean {
+  return Boolean(
+    message && (
+      ToolMessage.isInstance(message) ||
+      message.getType?.() === "tool" ||
+      message.lc_kwargs?.type === "tool" ||
+      message.kwargs?.type === "tool" ||
+      message.role === "tool"
+    )
+  );
+}
+
+export function hasToolCalls(message: any): boolean {
+  return Array.isArray(message?.tool_calls) && message.tool_calls.length > 0;
+}
+
+export function extractMessageText(message: any): string {
+  if (!message) return "";
+  if (typeof message.content === "string") return message.content;
+  if (typeof message.kwargs?.content === "string") return message.kwargs.content;
+  if (typeof message.lc_kwargs?.content === "string") return message.lc_kwargs.content;
+  return contentToText(message.content);
+}
+
 export function extractLastUserText(state: any): string {
   const rawMessages = Array.isArray(state?.messages) ? state.messages : [];
   const messages = rawMessages.length > 0 && Array.isArray(rawMessages[0]) ? rawMessages.flat() : rawMessages;
