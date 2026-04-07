@@ -6,6 +6,7 @@ import { z } from "zod";
 import { addFeatureLayerToCurrentMap } from "../utils/featureLayerEdits";
 import { getCredential, searchPortalLayerByName } from "../utils/arcgisOnline";
 import esriConfig from "@arcgis/core/config";
+import { extractLastUserText } from "../utils/agentHelpers";
 
 // ── Extraction tool ────────────────────────────────────────────────────────────
 
@@ -30,18 +31,7 @@ const addLayerTool = tool(
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
-function extractLastUserText(state: any): string {
-  const rawMessages = Array.isArray(state?.messages) ? state.messages : [];
-  const messages = rawMessages.length > 0 && Array.isArray(rawMessages[0]) ? rawMessages.flat() : rawMessages;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (!msg) continue;
-    if (typeof msg.lc_kwargs?.content === "string") return msg.lc_kwargs.content.trim();
-    if (typeof msg.kwargs?.content === "string") return msg.kwargs.content.trim();
-    if (typeof msg.content === "string") return msg.content.trim();
-  }
-  return "";
-}
+
 
 function normalizeServiceUrl(url: string): string {
   const trimmed = url.trim().replace(/\/+$/, "");

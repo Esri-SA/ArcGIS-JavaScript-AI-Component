@@ -1,13 +1,13 @@
 import { StateGraph, Annotation as ANNOTATION, START, END } from "@langchain/langgraph/web";
 import { invokeToolPrompt } from "@arcgis/ai-orchestrator";
 import { HumanMessage } from "@langchain/core/messages";
+import * as locator from "@arcgis/core/rest/locator";
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 import {
   addPointFeaturesToLayer,
   buildPointFeatureDraftsFromMemory,
   deleteFeaturesByName,
-  PointFeatureDraft,
   updateFeaturesByName,
   upsertPointFeaturesByName,
 } from "../utils/featureLayerEdits";
@@ -16,6 +16,7 @@ import {
   getLastCreatedFeatureLayer,
 } from "../utils/assistantState";
 import { searchPortalLayerByName } from "../utils/arcgisOnline";
+import { extractLastUserText } from "../utils/agentHelpers";
 
 const editIntentTool = tool(
   async (args) => JSON.stringify(args),
@@ -61,18 +62,7 @@ const editIntentTool = tool(
   }
 );
 
-function extractLastUserText(state: any): string {
-  const rawMessages = Array.isArray(state?.messages) ? state.messages : [];
-  const messages = rawMessages.length > 0 && Array.isArray(rawMessages[0]) ? rawMessages.flat() : rawMessages;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (!msg) continue;
-    if (typeof msg.lc_kwargs?.content === "string") return msg.lc_kwargs.content.trim();
-    if (typeof msg.kwargs?.content === "string") return msg.kwargs.content.trim();
-    if (typeof msg.content === "string") return msg.content.trim();
-  }
-  return "";
-}
+
 
 function findLayerUrlByName(name: string): string | null {
   const mapEl = document.querySelector("#main-map") as any;
@@ -96,25 +86,18 @@ async function geocodeLocation(location: string): Promise<{
   longitude: number;
   extent?: { xmin: number; ymin: number; xmax: number; ymax: number };
 } | null> {
-  const params = new URLSearchParams({
-    f: "json",
-    SingleLine: location,
-    maxLocations: "1",
-    outFields: "*",
-    forStorage: "false",
-  });
   try {
-    const resp = await fetch(`https://geocode-api.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?${params}`);
-    if (!resp.ok) return null;
-    const json: any = await resp.json();
-    const candidate = json?.candidates?.[0];
-    const latitude = Number(candidate?.location?.y);
-    const longitude = Number(candidate?.location?.x);
-    if (isNaN(latitude) || isNaN(longitude)) return null;
-    const ext = candidate?.extent;
-    const extent = ext
-      ? { xmin: Number(ext.xmin), ymin: Number(ext.ymin), xmax: Number(ext.xmax), ymax: Number(ext.ymax) }
-      : undefined;
+    const results = await locator.addressToLocations(
+      "https://geocode-api.arcgis.com/arcgis/rest/services/World/GeocodeServer",
+      { address: { SingleLine: location }, maxLocations: 1, outFields: ["Match_addr"] },
+    );
+    const c = results?.[0];
+    if (!c) return null;
+    const longitude = c.location?.x;
+    const latitude = c.location?.y;
+    if (typeof latitude !== "number" || typeof longitude !== "number" || isNaN(latitude) || isNaN(longitude)) return null;
+    const ext = (c as any).extent;
+    const extent = ext ? { xmin: Number(ext.xmin), ymin: Number(ext.ymin), xmax: Number(ext.xmax), ymax: Number(ext.ymax) } : undefined;
     return { latitude, longitude, extent };
   } catch {
     return null;

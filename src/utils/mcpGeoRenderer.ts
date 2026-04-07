@@ -5,13 +5,15 @@ import Graphic from "@arcgis/core/Graphic";
 import Point from "@arcgis/core/geometry/Point";
 import Polygon from "@arcgis/core/geometry/Polygon";
 import * as geometryJsonUtils from "@arcgis/core/geometry/support/jsonUtils";
+import * as locator from "@arcgis/core/rest/locator";
+import IdentityManager from "@arcgis/core/identity/IdentityManager";
 
 // ── Service config ────────────────────────────────────────────────────────────
 
 const BOUNDARIES_BASE =
   "https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/WOR_Boundaries_2024/FeatureServer";
 const WORLD_GEOCODER_URL =
-  "https://geocode-api.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates";
+  "https://geocode-api.arcgis.com/arcgis/rest/services/World/GeocodeServer";
 
 /** Layer IDs inside WOR_Boundaries_2024 */
 export const LAYER_REGION = 0;
@@ -22,10 +24,18 @@ export const MCP_GEO_LAYER_ID = "mcp-geo-results";
 export const MCP_GEO_SOURCE_LAYER_ID = "mcp-geo-source-results";
 export const MCP_GEO_INTERACTIVE_LAYER_ID = "mcp-geo-interactive-results";
 
+type RenderLayer = {
+  id: string;
+  title: string;
+  geometryType: "point" | "polygon";
+  renderer: any;
+  graphics: Graphic[];
+};
+
 interface RenderLayerCollection {
   prefix: string;
   label: string;
-  layers: Map<string, { id: string; title: string; geometryType: "point" | "polygon"; renderer: any; graphics: Graphic[] }>;
+  layers: Map<string, RenderLayer>;
   order: string[];
 }
 
@@ -121,32 +131,28 @@ async function geocodeSingleLine(singleLine: string): Promise<{ latitude: number
   if (!cacheKey) return null;
   if (geocodeCache.has(cacheKey)) return geocodeCache.get(cacheKey) ?? null;
 
-  const params = new URLSearchParams({
-    f: "json",
-    SingleLine: singleLine,
-    maxLocations: "1",
-    outFields: "Match_addr,Addr_type,City,Region",
-    forStorage: "false",
-  });
-
   try {
-    const response = await fetch(`${WORLD_GEOCODER_URL}?${params.toString()}`);
-    if (!response.ok) {
+    const candidates = await locator.addressToLocations(WORLD_GEOCODER_URL, {
+      address: { SingleLine: singleLine },
+      maxLocations: 1,
+      outFields: ["Match_addr", "Addr_type"],
+    } as any);
+    const match = candidates?.[0];
+    if (!match?.location) {
       geocodeCache.set(cacheKey, null);
       return null;
     }
-    const json: any = await response.json();
-    const candidate = Array.isArray(json?.candidates) ? json.candidates[0] : null;
-    const latitude = Number(candidate?.location?.y);
-    const longitude = Number(candidate?.location?.x);
-    if (isNaN(latitude) || isNaN(longitude)) {
+    const lat = match.location.latitude;
+    const lon = match.location.longitude;
+    if (lat == null || lon == null || isNaN(lat) || isNaN(lon)) {
       geocodeCache.set(cacheKey, null);
       return null;
     }
+    const attrs: any = match.attributes ?? {};
     const value = {
-      latitude,
-      longitude,
-      label: String(candidate?.attributes?.Match_addr ?? singleLine),
+      latitude: lat,
+      longitude: lon,
+      label: String(attrs.Match_addr ?? singleLine),
     };
     geocodeCache.set(cacheKey, value);
     return value;
@@ -351,21 +357,36 @@ function findPreviewImageUrl(ctx?: GeoContext): string | null {
   return linkMatch?.url ?? null;
 }
 
+/**
+ * Append an ArcGIS credential token to portal/AGOL thumbnail URLs so that
+ * <img> tags (which bypass JSAPI's request interceptor) can load protected images.
+ */
+function appendTokenIfNeeded(url: string): string {
+  if (!/arcgis\.com|arcgisonline\.com/i.test(url)) return url;
+  try {
+    const cred = IdentityManager.findCredential(url);
+    if (cred?.token) {
+      const sep = url.includes("?") ? "&" : "?";
+      return `${url}${sep}token=${encodeURIComponent(cred.token)}`;
+    }
+  } catch {
+    // IdentityManager not yet initialised — return URL as-is
+  }
+  return url;
+}
+
 function buildImageCardHtml(ctx?: GeoContext): string {
   const imageUrl = findPreviewImageUrl(ctx);
   if (!imageUrl) return "";
+  const authedUrl = appendTokenIfNeeded(imageUrl);
 
   return `
     <div style="margin-top:10px">
       <div style="font-size:0.72rem;font-weight:700;color:#62707c;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Preview</div>
-      <a href="${esc(imageUrl)}" target="_blank" rel="noopener noreferrer" style="display:block;text-decoration:none">
-        <img src="${esc(imageUrl)}" alt="Preview image" loading="lazy" referrerpolicy="no-referrer" style="display:block;width:100%;max-width:260px;max-height:180px;object-fit:cover;border-radius:10px;border:1px solid #d8dde3;background:#f4f6f8" onerror="this.style.display='none'" />
+      <a href="${esc(authedUrl)}" target="_blank" rel="noopener noreferrer" style="display:block;text-decoration:none">
+        <img src="${esc(authedUrl)}" alt="Preview image" loading="lazy" style="display:block;width:100%;max-width:260px;max-height:180px;object-fit:cover;border-radius:10px;border:1px solid #d8dde3;background:#f4f6f8" onerror="this.style.display='none'" />
       </a>
     </div>`;
-}
-
-function pointSymbolFor(pt: GeoPoint) {
-  return POINT_SYMBOL;
 }
 
 function normalizePlaceKey(value: string): string {
@@ -394,7 +415,7 @@ function ensureRenderLayer(
   title: string,
   geometryType: "point" | "polygon",
   symbol: any,
-): { id: string; title: string; geometryType: "point" | "polygon"; renderer: any; graphics: Graphic[] } {
+): RenderLayer {
   const existing = collection.layers.get(key);
   if (existing) return existing;
 
@@ -413,20 +434,18 @@ function ensureRenderLayer(
   return layer;
 }
 
-function collectionLayers(collection: RenderLayerCollection): Array<{ id: string; title: string; geometryType: "point" | "polygon"; renderer: any; graphics: Graphic[] }> {
+function collectionLayers(collection: RenderLayerCollection): RenderLayer[] {
   return collection.order
     .map((key) => collection.layers.get(key))
-    .filter((layer): layer is { id: string; title: string; geometryType: "point" | "polygon"; renderer: any; graphics: Graphic[] } => Boolean(layer));
+    .filter((layer): layer is RenderLayer => Boolean(layer));
 }
 
-function buildLayerFields(): Array<{ name: string; alias: string; type: "oid" | "string" }> {
-  return [
-    { name: "OBJECTID", alias: "OBJECTID", type: "oid" },
-    { name: "name", alias: "name", type: "string" },
-  ];
-}
+const LAYER_FIELDS: Array<{ name: string; alias: string; type: "oid" | "string" }> = [
+  { name: "OBJECTID", alias: "OBJECTID", type: "oid" },
+  { name: "name", alias: "name", type: "string" },
+];
 
-async function createRenderFeatureLayer(layer: { id: string; title: string; geometryType: "point" | "polygon"; renderer: any; graphics: Graphic[] }): Promise<FeatureLayer | null> {
+async function createRenderFeatureLayer(layer: RenderLayer): Promise<FeatureLayer | null> {
   if (!layer.graphics.length) return null;
 
   const source = layer.graphics.map((graphic, index) => {
@@ -447,7 +466,7 @@ async function createRenderFeatureLayer(layer: { id: string; title: string; geom
     legendEnabled: true,
     source,
     objectIdField: "OBJECTID",
-    fields: buildLayerFields(),
+    fields: LAYER_FIELDS,
     displayField: "name",
     geometryType: layer.geometryType,
     spatialReference: { wkid: 4326 },
@@ -703,21 +722,14 @@ export async function renderMcpGeoEntities(
   clearMcpGeoLayer();
 
   const sourceCollection = createRenderLayerCollection();
-  const sourceEntities = entities;
 
   async function addEntitiesToCollection(targetCollection: RenderLayerCollection, layerEntities: GeoEntity[]): Promise<void> {
-    const countries = layerEntities.filter((e): e is GeoCountry => e.kind === "country");
-    const regions = layerEntities.filter((e): e is GeoRegion => e.kind === "region");
     const namedPlaces = layerEntities.filter((e): e is GeoNamedPlace => e.kind === "named");
     const extents = layerEntities.filter((e): e is GeoExtent => e.kind === "extent");
     const points = layerEntities.filter((e): e is GeoPoint => e.kind === "point");
-    const polygonEntityCount = countries.length + regions.length + namedPlaces.length;
-    const hasExplicitGeometry = points.length > 0 || extents.length > 0 || countries.length > 0 || regions.length > 0;
-    const areaPlaceNames = [
-      ...countries.map((entity) => entity.name),
-      ...regions.map((entity) => entity.name),
-      ...namedPlaces.map((entity) => entity.name),
-    ];
+    const polygonEntityCount = namedPlaces.length;
+    const hasExplicitGeometry = points.length > 0 || extents.length > 0;
+    const areaPlaceNames = namedPlaces.map((entity) => entity.name);
     const filteredPoints = polygonEntityCount > 0
       ? points.filter((point) => !areaPlaceNames.some((name) => placeKeysMatch(point.label, name)))
       : points;
@@ -730,40 +742,14 @@ export async function renderMcpGeoEntities(
     for (const pt of filteredPoints) {
       const g = new Graphic({
         geometry: new Point({ latitude: pt.lat, longitude: pt.lon }),
-        symbol: pointSymbolFor(pt) as any,
+        symbol: POINT_SYMBOL as any,
         attributes: { name: pt.label },
         popupTemplate: {
           title: pt.label,
           content: buildPointPopupContent(pt),
         } as any,
       });
-      ensureRenderLayer(targetCollection, "points", "Points", "point", pointSymbolFor(pt)).graphics.push(g);
-    }
-
-    if (countries.length) {
-      const list = countries
-        .map((c) => `'${c.name.replace(/'/g, "''")}'`)
-        .join(",");
-      const features = await queryLayer(LAYER_COUNTRY, `NAME IN (${list})`);
-      for (const feat of features) {
-        const name = (feat.attributes?.NAME ?? "").toLowerCase();
-        const entity = countries.find((c) => c.name.toLowerCase() === name);
-        const g = countryFeatureToGraphic(feat, entity);
-        if (g) ensureRenderLayer(targetCollection, "countries", "Countries", "polygon", COUNTRY_SYMBOL).graphics.push(g);
-      }
-    }
-
-    if (regions.length) {
-      const list = regions
-        .map((r) => `'${r.name.replace(/'/g, "''")}'`)
-        .join(",");
-      const features = await queryLayer(LAYER_REGION, `REGION IN (${list})`);
-      for (const feat of features) {
-        const featureRegion = String(feat.attributes?.REGION ?? "");
-        const entity = regions.find((r) => r.name === featureRegion);
-        const g = regionFeatureToGraphic(feat, entity);
-        if (g) ensureRenderLayer(targetCollection, "regions", "Regions", "polygon", REGION_SYMBOL).graphics.push(g);
-      }
+      ensureRenderLayer(targetCollection, "points", "Points", "point", POINT_SYMBOL).graphics.push(g);
     }
 
     if (namedPlaces.length && !hasExplicitGeometry) {
@@ -797,7 +783,9 @@ export async function renderMcpGeoEntities(
         }
       }
 
-      const regionNames = [...new Set(candidateGroups.flatMap((group) => group.candidates))];
+      const regionNames = [...new Set(
+        candidateGroups.filter((_, i) => !resolvedGroups.has(i)).flatMap((group) => group.candidates),
+      )];
       if (regionNames.length) {
         const list = regionNames.map((name) => `'${name.replace(/'/g, "''")}'`).join(",");
         const features = await queryLayer(LAYER_REGION, `REGION IN (${list})`);
@@ -840,24 +828,22 @@ export async function renderMcpGeoEntities(
 
         const g = new Graphic({
           geometry: new Point({ latitude: pointEntity.lat, longitude: pointEntity.lon }),
-          symbol: pointSymbolFor(pointEntity) as any,
+          symbol: POINT_SYMBOL as any,
           attributes: { name: pointEntity.label },
           popupTemplate: {
             title: pointEntity.label,
             content: buildPointPopupContent(pointEntity),
           } as any,
         });
-        ensureRenderLayer(targetCollection, "points", "Points", "point", pointSymbolFor(pointEntity)).graphics.push(g);
+        ensureRenderLayer(targetCollection, "points", "Points", "point", POINT_SYMBOL).graphics.push(g);
       }
     }
   }
 
-  await addEntitiesToCollection(sourceCollection, sourceEntities);
+  await addEntitiesToCollection(sourceCollection, entities);
 
   const interactiveGraphics = collectionGraphics(sourceCollection);
-  const layersToAdd = [
-    ...(await nonEmptyCollectionLayers(sourceCollection)),
-  ];
+  const layersToAdd = await nonEmptyCollectionLayers(sourceCollection);
   if (!layersToAdd.length && !interactiveGraphics.length) return;
 
   if (layersToAdd.length) {
@@ -882,14 +868,11 @@ export async function renderMcpGeoEntities(
     view.map.add(interactiveLayer);
   }
 
-  const allGraphics = [
-    ...interactiveGraphics,
-  ];
-  if (allGraphics.length) {
+  if (interactiveGraphics.length) {
     try {
-      await view.goTo(allGraphics, {
+      await view.goTo(interactiveGraphics, {
         animate: true,
-        duration: allGraphics.length === 1 ? 320 : 520,
+        duration: interactiveGraphics.length === 1 ? 320 : 520,
       });
     } catch {
       // goTo may fail if the view is not ready; ignore silently.

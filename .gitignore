@@ -37,3 +37,6 @@ demo-script-8-10min.md
 # Local test harness kept out of git on purpose
 tests/
 test-prompts.txt
+
+# HAR captures — may contain auth tokens, API keys, full request/response bodies
+*.har

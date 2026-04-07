@@ -129,41 +129,6 @@ arcgis-map {
   min-height: 0;
 }
 
-.chat-panel-theme__status {
-  flex: 0 0 auto;
-}
-
-.chat-panel-theme__notice {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0.7rem 0.85rem;
-  border: 1px solid #d8e4ee;
-  border-radius: 10px;
-  background: #f8fbfd;
-  color: #395164;
-  font-size: 0.85rem;
-  line-height: 1.45;
-}
-
-.chat-panel-theme__notice-close {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.9rem;
-  height: 1.9rem;
-  border: 1px solid #c8d3dc;
-  border-radius: 999px;
-  background: #ffffff;
-  color: #203040;
-  font-size: 1rem;
-  line-height: 1;
-  padding: 0;
-  cursor: pointer;
-}
-
 .theme-editor-dialog {
   display: grid;
   gap: 0.9rem;
@@ -344,19 +309,6 @@ arcgis-map {
   color: #516473;
 }
 
-.theme-editor-field input,
-.theme-editor-field select {
-  width: 100%;
-  min-width: 0;
-  padding: 0.55rem 0.7rem;
-  border: 1px solid #ced8df;
-  border-radius: 10px;
-  background: #fbfdfe;
-  color: #203040;
-  font: inherit;
-  box-sizing: border-box;
-}
-
 .theme-editor-color-field {
   padding: 0.55rem 0.65rem;
   border: 1px solid #ced8df;
@@ -370,6 +322,26 @@ arcgis-map {
   padding: 0;
   border: 0;
   background: transparent;
+}
+
+.theme-editor-text-input {
+  width: 100%;
+  height: 2rem;
+  padding: 0 0.625rem;
+  font-size: 0.875rem;
+  font-family: inherit;
+  color: #203040;
+  background: #fff;
+  border: 1px solid #ced8df;
+  border-radius: 4px;
+  box-sizing: border-box;
+  outline: none;
+  appearance: auto;
+}
+
+.theme-editor-text-input:focus {
+  border-color: #007ac2;
+  box-shadow: 0 0 0 2px rgba(0, 122, 194, 0.15);
 }
 
 @media (max-width: 900px) {
@@ -402,4 +374,94 @@ arcgis-map {
   .theme-editor-grid--text {
     grid-template-columns: 1fr;
   }
+}
+
+/* ── Centered screen wrapper (sign-in, map picker) ─────────────────────────── */
+.centered-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  background-color: #f8f8f8;
+}
+
+/* ── Sign-in screen ─────────────────────────────────────────────────────────── */
+.sign-in-panel {
+  width: 340px;
+  max-width: 90vw;
+}
+
+.sign-in-body {
+  padding: 1.5rem;
+  text-align: center;
+}
+
+.sign-in-text {
+  margin-top: 0;
+  margin-bottom: 0.35rem;
+  color: #4a4a4a;
+}
+
+.sign-in-subtext {
+  margin-top: 0;
+  margin-bottom: 1rem;
+  color: #6b6b6b;
+  font-size: 0.9rem;
+}
+
+.sign-in-button-row {
+  display: flex;
+  justify-content: center;
+}
+
+/* ── Map picker screen ──────────────────────────────────────────────────────── */
+.map-picker-panel {
+  width: 420px;
+  max-width: 90vw;
+}
+
+.panel-body {
+  padding: 1.5rem;
+}
+
+.map-picker-hint {
+  font-size: 0.85rem;
+  color: #5a6a79;
+  line-height: 1.45;
+  margin: 0;
+}
+
+/* ── Change-map dialog body ─────────────────────────────────────────────────── */
+.change-map-dialog-body {
+  padding: 0.75rem 0;
+}
+
+.change-map-current {
+  margin-bottom: 1rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--calcite-color-background, #f3f3f3);
+  border-radius: 4px;
+  border-left: 3px solid var(--calcite-color-brand, #007ac2);
+}
+
+.change-map-current__label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--calcite-color-text-3, #6b6b6b);
+  margin-bottom: 0.2rem;
+}
+
+.change-map-current__title {
+  font-size: 0.98rem;
+  font-weight: 700;
+  color: var(--calcite-color-text-1, #203040);
+  line-height: 1.3;
+}
+
+.change-map-current__id {
+  font-family: monospace;
+  font-size: 0.78rem;
+  color: var(--calcite-color-text-3, #6b6b6b);
+  margin-top: 0.15rem;
 }

@@ -1,5 +1,6 @@
 import type { CreateHostedFeatureServiceResult } from "../utils/arcgisOnline";
 import { getCredential, createHostedFeatureService } from "../utils/arcgisOnline";
+import { extractLastUserText } from "../utils/agentHelpers";
 import { invokeToolPrompt } from "@arcgis/ai-orchestrator";
 import { HumanMessage } from "@langchain/core/messages";
 import { tool } from "@langchain/core/tools";
@@ -76,20 +77,7 @@ const extractionTool = tool(
   }
 );
 
-function extractLastUserText(state: any): string {
-  const rawMessages = Array.isArray(state?.messages) ? state.messages : [];
-  const messages = rawMessages.length > 0 && Array.isArray(rawMessages[0]) ? rawMessages.flat() : rawMessages;
 
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (!message) continue;
-    if (typeof message.lc_kwargs?.content === "string") return message.lc_kwargs.content.trim();
-    if (typeof message.kwargs?.content === "string") return message.kwargs.content.trim();
-    if (typeof message.content === "string") return message.content.trim();
-  }
-
-  return "";
-}
 
 export function registerCreateFeatureLayerAgent(
   assistant: HTMLElement,
@@ -271,18 +259,12 @@ export function registerCreateFeatureLayerAgent(
       }
     }
 
-    function replyNode() {
-      return { outputMessage: "Create feature layer workflow completed." };
-    }
-
     return new StateGraph(state)
       .addNode("parseRequestNode", parseRequestNode)
       .addNode("createLayerNode", createLayerNode)
-      .addNode("replyNode", replyNode)
       .addEdge(START, "parseRequestNode")
-      .addConditionalEdges("parseRequestNode", (s: any) => s.handoffToExistingLayer ? "replyNode" : "createLayerNode")
-      .addEdge("createLayerNode", "replyNode")
-      .addEdge("replyNode", END);
+      .addConditionalEdges("parseRequestNode", (s: any) => s.handoffToExistingLayer ? END : "createLayerNode")
+      .addEdge("createLayerNode", END);
   };
 
   const agent = {
