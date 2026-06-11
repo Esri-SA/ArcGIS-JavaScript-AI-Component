@@ -120,6 +120,10 @@ export function useWebMap(
 
     const handleError = (event: Event) => {
       if (cancelled) return;
+      // Only treat this as a fatal WebMap error if the view never became ready. Once the
+      // map is up, a load error from an operational layer (e.g. a STAC imagery tile layer)
+      // must not tear down the whole map view.
+      if ((mapElement as any).ready || (mapElement as any).view?.ready) return;
       const msg: string =
         (event as CustomEvent)?.detail?.error?.message ??
         (event as CustomEvent)?.detail?.message ??
