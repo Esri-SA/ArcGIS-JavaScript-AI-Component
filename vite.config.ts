@@ -14,6 +14,9 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react()],
     server: {
+      port: 5300,
+      host: "localhost",
+      strictPort: true,
       proxy: {
         /**
          * Universal MCP relay: /dev-mcp-relay/http(s)/host:port[/path]
