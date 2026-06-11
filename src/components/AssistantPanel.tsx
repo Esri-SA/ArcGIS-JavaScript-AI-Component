@@ -1,5 +1,6 @@
 import React, { useEffect } from "react";
 import { installAssistantUserBubbleStyler } from "../utils/assistantStyler";
+import { ensureAssistantSuggestionsBar, fillAssistantComposer } from "../utils/assistantSuggestions";
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
@@ -42,7 +43,8 @@ export function AssistantPanel({
   showEmptyMapAssistantNotice,
   onDismissEmptyMapNotice,
 }: AssistantPanelProps) {
-  // Install the bubble-styler / link opener whenever the assistant is rendered
+  // Install the bubble-styler / link opener whenever the assistant is rendered,
+  // and inject the starter-prompt chip bar just above the composer input.
   useEffect(() => {
     if (!isMapReady || mapLoadError) return;
 
@@ -51,8 +53,15 @@ export function AssistantPanel({
     ) as HTMLElement | null;
     if (!assistant) return;
 
-    return installAssistantUserBubbleStyler(assistant);
-  }, [webMapId, isMapReady, mapLoadError]);
+    const onPick = (prompt: string) => fillAssistantComposer(assistant, prompt);
+
+    // The composer lives inside nested shadow roots that mount asynchronously.
+    // The styler already recursively observes those roots, so piggyback on its
+    // scan callback to (re)inject the chip bar once the composer DOM exists.
+    return installAssistantUserBubbleStyler(assistant, () => {
+      ensureAssistantSuggestionsBar(assistant, onPick);
+    });
+  }, [webMapId, isMapReady, mapLoadError, mcpHubRefreshToken]);
 
   const shouldRenderAssistant = isMapReady && !mapLoadError;
 
