@@ -117,8 +117,15 @@ function ensureLinksOpenInNewTab(root: Element | ShadowRoot): void {
  * - Intercepts link clicks to use window.open instead of navigation
  *
  * Returns a cleanup function that removes the observer and listener.
+ *
+ * @param onScan Optional callback invoked after every tree scan (initial and on
+ *   each mutation, including inside nested shadow roots). Use it to inject extra
+ *   UI — e.g. the suggestions chip bar — once the deep composer DOM has mounted.
  */
-export function installAssistantUserBubbleStyler(assistant: HTMLElement): () => void {
+export function installAssistantUserBubbleStyler(
+  assistant: HTMLElement,
+  onScan?: (assistant: HTMLElement) => void,
+): () => void {
   const handleClick = (event: Event) => {
     const path =
       typeof (event as any).composedPath === "function"
@@ -139,6 +146,7 @@ export function installAssistantUserBubbleStyler(assistant: HTMLElement): () => 
   const observer = new MutationObserver(() => {
     scanTree(assistant);
     if (assistant.shadowRoot) scanTree(assistant.shadowRoot);
+    onScan?.(assistant);
   });
 
   const observedRoots = new WeakSet<Node>();
@@ -180,6 +188,7 @@ export function installAssistantUserBubbleStyler(assistant: HTMLElement): () => 
     observeRoot(assistant.shadowRoot);
     scanTree(assistant.shadowRoot);
   }
+  onScan?.(assistant);
 
   return () => {
     assistant.removeEventListener("click", handleClick, true);
