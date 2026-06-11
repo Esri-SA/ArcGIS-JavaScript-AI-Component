@@ -135,6 +135,9 @@ This is the core. The app uses Esri's `<arcgis-assistant>` web component as a
 **multi-agent router**: it reads each agent's `description` and routes each user
 message to exactly one agent, then runs that agent's **LangGraph** to completion.
 
+> To build a new custom agent, follow the step-by-step guide in
+> [ADDING_CUSTOM_AGENTS.md](./ADDING_CUSTOM_AGENTS.md).
+
 ### 6.1 Agent registry
 
 ```mermaid
