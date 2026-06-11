@@ -8,6 +8,7 @@ import { registerCreateFeatureLayerAgent } from "../agents/CreateFeatureLayerAge
 import { registerManageFeatureLayerAgent } from "../agents/ManageFeatureLayerAgent";
 import { registerFeatureLayerCapabilitiesAgent } from "../agents/AllCapabilitiesAgent";
 import { registerAddLayerToMapAgent } from "../agents/AddLayerToMapAgent";
+import { registerStacSearchAgent } from "../agents/StacSearchAgent";
 
 function toAssistantPreparationErrorMessage(message: string): string {
   if (/eligible layers or fields|generate embeddings|embedding/i.test(message)) {
@@ -69,6 +70,7 @@ export function useAssistantSetup(
     registerManageFeatureLayerAgent(assistant);
     registerAddLayerToMapAgent(assistant);
     registerFeatureLayerCapabilitiesAgent(assistant);
+    registerStacSearchAgent(assistant);
     registerMcpPassthroughAgent(assistant, { baseUrl: mcpBaseUrl, serverName: "MCP Hub" });
     void refreshMcpAgentDescription(assistant);
   }, [webMapId, isMapReady, mcpHubRefreshToken, oauthClientId, portalUrl, mcpBaseUrl]);
